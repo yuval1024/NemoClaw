@@ -73,6 +73,11 @@ type BuildGatewayLaunchOptions = {
   env?: NodeJS.ProcessEnv;
   hostGlibcVersion?: string | null;
   requiredGlibcVersions?: string[];
+  // Default compatibility container name when NEMOCLAW_OPENSHELL_GATEWAY_COMPAT_CONTAINER_NAME
+  // is unset. Callers pass a per-gateway-port name so a second sandbox's compat
+  // container (and its pre-launch `docker rm`) cannot tear down the first
+  // sandbox's gateway container (#4422).
+  compatContainerName?: string;
 };
 
 export function compareDottedVersions(a: string, b: string): number {
@@ -289,7 +294,7 @@ export function buildDockerDriverGatewayLaunch(
   const image = safeDockerImage(env.NEMOCLAW_OPENSHELL_GATEWAY_COMPAT_IMAGE, DEFAULT_COMPAT_IMAGE);
   const containerName = safeDockerName(
     env.NEMOCLAW_OPENSHELL_GATEWAY_COMPAT_CONTAINER_NAME,
-    DEFAULT_COMPAT_CONTAINER_NAME,
+    options.compatContainerName?.trim() || DEFAULT_COMPAT_CONTAINER_NAME,
   );
   const dockerHost = safeDockerHost(env.DOCKER_HOST);
   if (dockerHost) {

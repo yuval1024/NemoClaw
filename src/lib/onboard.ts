@@ -470,6 +470,11 @@ const dockerDriverGatewayEnv: typeof import("./onboard/docker-driver-gateway-env
 const { getDockerDriverGatewayEndpoint } = dockerDriverGatewayEnv;
 const dockerDriverGatewayRuntimeMarker: typeof import("./onboard/docker-driver-gateway-runtime-marker") =
   require("./onboard/docker-driver-gateway-runtime-marker");
+const {
+  resolveGatewayName,
+  resolveGatewayStateDirName,
+  resolveGatewayCompatContainerName,
+}: typeof import("./onboard/gateway-binding") = require("./onboard/gateway-binding");
 const hostGatewayProcess: typeof import("./onboard/host-gateway-process") =
   require("./onboard/host-gateway-process");
 const vmDriverProcess: typeof import("./onboard/vm-driver-process") = require("./onboard/vm-driver-process");
@@ -572,7 +577,11 @@ const USE_COLOR = !process.env.NO_COLOR && !!process.stdout.isTTY;
 const DIM = USE_COLOR ? "\x1b[2m" : "";
 const RESET = USE_COLOR ? "\x1b[0m" : "";
 let OPENSHELL_BIN: string | null = null;
-const GATEWAY_NAME = "nemoclaw";
+// Per-port gateway registration name. The default gateway port keeps the bare
+// `nemoclaw` name for backward compatibility; a non-default NEMOCLAW_GATEWAY_PORT
+// yields `nemoclaw-<port>` so a second sandbox's gateway lifecycle never
+// recreates/kills the first sandbox's gateway (#4422).
+const GATEWAY_NAME = resolveGatewayName(GATEWAY_PORT);
 const OPENCLAW_LAUNCH_AGENT_PLIST = "~/Library/LaunchAgents/ai.openclaw.gateway.plist";
 
 const BRAVE_SEARCH_HELP_URL = "https://brave.com/search/api/";
@@ -664,12 +673,34 @@ const {
 const {
   isSandboxReady,
   parseSandboxStatus,
-  hasStaleGateway,
-  isSelectedGateway,
-  isGatewayHealthy,
-  getGatewayReuseState,
   getSandboxStateFromOutputs,
 } = gatewayState;
+
+// Bind the gateway-name-aware health/reuse classifiers to this onboard's
+// resolved GATEWAY_NAME so a non-default NEMOCLAW_GATEWAY_PORT (gateway
+// `nemoclaw-<port>`) is recognized as its own gateway rather than being
+// matched against the `nemoclaw` singleton (#4422).
+const hasStaleGateway = (gwInfoOutput = ""): boolean =>
+  gatewayState.hasStaleGateway(gwInfoOutput, GATEWAY_NAME);
+const isSelectedGateway = (statusOutput = ""): boolean =>
+  gatewayState.isSelectedGateway(statusOutput, GATEWAY_NAME);
+const isGatewayHealthy = (
+  statusOutput = "",
+  gwInfoOutput = "",
+  activeGatewayInfoOutput = "",
+): boolean =>
+  gatewayState.isGatewayHealthy(statusOutput, gwInfoOutput, activeGatewayInfoOutput, GATEWAY_NAME);
+const getGatewayReuseState = (
+  statusOutput = "",
+  gwInfoOutput = "",
+  activeGatewayInfoOutput = "",
+): GatewayReuseState =>
+  gatewayState.getGatewayReuseState(
+    statusOutput,
+    gwInfoOutput,
+    activeGatewayInfoOutput,
+    GATEWAY_NAME,
+  );
 
 const { getGatewayReuseSnapshot, selectNamedGatewayForReuseIfNeeded } =
   gatewayReuse.createGatewayReuseHelpers({
@@ -1203,7 +1234,7 @@ async function refreshDockerDriverGatewayReuseState(
   const baseDesiredEnv = getDockerDriverGatewayEnv(
     runCaptureOpenshell(["--version"], { ignoreError: true }),
   );
-  const runtimeIdentity = gatewayBin ? dockerDriverGatewayLaunch.buildDockerDriverGatewayRuntimeIdentity({ gatewayBin, gatewayEnv: baseDesiredEnv, stateDir: getDockerDriverGatewayStateDir(), sandboxBin: resolveOpenShellSandboxBinary() }) : null;
+  const runtimeIdentity = gatewayBin ? dockerDriverGatewayLaunch.buildDockerDriverGatewayRuntimeIdentity({ gatewayBin, gatewayEnv: baseDesiredEnv, stateDir: getDockerDriverGatewayStateDir(), sandboxBin: resolveOpenShellSandboxBinary(), compatContainerName: resolveGatewayCompatContainerName(GATEWAY_PORT) }) : null;
   const desiredEnv = runtimeIdentity?.desiredEnv ?? baseDesiredEnv;
   const driftBin = dockerDriverGatewayLaunch.resolveDriftGatewayBin(runtimeIdentity, gatewayBin);
   const identityBin = runtimeIdentity?.identityGatewayBin ?? gatewayBin;
@@ -1395,7 +1426,16 @@ const {
 function getDockerDriverGatewayStateDir(): string {
   const configured = process.env.NEMOCLAW_OPENSHELL_GATEWAY_STATE_DIR;
   if (configured && configured.trim()) return path.resolve(configured.trim());
-  return path.join(os.homedir(), ".local", "state", "nemoclaw", "openshell-docker-gateway");
+  // Per-port leaf so each sandbox's gateway pid file and runtime marker stay
+  // isolated — a second onboard on a different port cannot overwrite the first
+  // sandbox's marker or clobber its pid file (#4422).
+  return path.join(
+    os.homedir(),
+    ".local",
+    "state",
+    "nemoclaw",
+    resolveGatewayStateDirName(GATEWAY_PORT),
+  );
 }
 
 function getDockerDriverGatewayPidFile(): string {
@@ -2418,7 +2458,7 @@ async function startDockerDriverGateway({ exitOnFailure = true, skipSandboxBridg
   });
   const gatewayEnv = getDockerDriverGatewayEnv(openshellVersionOutput);
   const stateDir = getDockerDriverGatewayStateDir();
-  const runtimeIdentity = gatewayBin ? dockerDriverGatewayLaunch.buildDockerDriverGatewayRuntimeIdentity({ gatewayBin, gatewayEnv, stateDir, sandboxBin: resolveOpenShellSandboxBinary() }) : null;
+  const runtimeIdentity = gatewayBin ? dockerDriverGatewayLaunch.buildDockerDriverGatewayRuntimeIdentity({ gatewayBin, gatewayEnv, stateDir, sandboxBin: resolveOpenShellSandboxBinary(), compatContainerName: resolveGatewayCompatContainerName(GATEWAY_PORT) }) : null;
   const gatewayLaunch = runtimeIdentity?.launch ?? null;
   const driftGatewayBin = dockerDriverGatewayLaunch.resolveDriftGatewayBin(runtimeIdentity, gatewayBin);
   const driftGatewayEnv = runtimeIdentity?.desiredEnv ?? gatewayEnv;
@@ -3817,6 +3857,8 @@ async function createSandbox(
     hermesToolGateways: hermesToolGateways.length > 0 ? [...hermesToolGateways] : undefined,
     ...onboardHermesDashboard.getHermesDashboardRegistryFields(finalHermesDashboardState),
     dashboardPort: actualDashboardPort,
+    gatewayName: GATEWAY_NAME,
+    gatewayPort: GATEWAY_PORT,
   });
   registry.setDefault(sandboxName);
 
