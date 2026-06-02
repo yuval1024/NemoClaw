@@ -433,6 +433,7 @@ const { handleProviderInferenceState }: typeof import("./onboard/machine/handler
 const { handleSandboxState }: typeof import("./onboard/machine/handlers/sandbox") = require("./onboard/machine/handlers/sandbox");
 const { getOnboardProgressStep }: typeof import("./onboard/machine/progress") = require("./onboard/machine/progress");
 const policies: typeof import("./policy") = require("./policy");
+const policyPresetCarry: typeof import("./onboard/policy-preset-persistence") = require("./onboard/policy-preset-persistence");
 const tiers: typeof import("./policy/tiers") = require("./policy/tiers");
 const { ensureUsageNoticeConsent } = require("./onboard/usage-notice");
 const {
@@ -536,7 +537,6 @@ import type {
   OpenShellInstallDeps,
   OpenShellInstallResult,
 } from "./onboard/openshell-install";
-import { decidePolicyCarryForward } from "./onboard/policy-carryforward";
 import { getSuggestedPolicyPresets } from "./onboard/policy-presets";
 import {
   computeSetupPresetSuggestions as computeSetupPresetSuggestionsImpl,
@@ -3078,6 +3078,8 @@ async function createSandbox(
       !hermesToolGatewayDrift &&
       !hermesDashboardDrift
     ) {
+      // Carry a finalized policy selection into the reused session (#4621).
+      policyPresetCarry.seedReusedSandboxPolicyPresets(sandboxName, isNonInteractive());
       // Guard against reusing a CPU-only sandbox when GPU passthrough is enabled.
       // Placed before the non-interactive / interactive split so all reuse
       // paths are covered (interactive prompt, non-interactive ready, unknown drift).
@@ -3236,12 +3238,8 @@ async function createSandbox(
     }
 
     const previousEntry: SandboxEntry | null = registry.getSandbox(sandboxName);
-    const decision = decidePolicyCarryForward(previousEntry?.policies, process.env, isNonInteractive());
-    onboardSession.updateSession((c: Session) => {
-      c.policyPresets = decision.newPresets;
-      return c;
-    });
-    if (decision.overrideNote !== null) note(decision.overrideNote);
+    // Carry the previous selection forward, honoring a finalized empty set (#4621).
+    policyPresetCarry.applyRecreatePolicyCarryForward(sandboxName, isNonInteractive(), note);
 
     if (pendingStateRestore === null && !shouldSkipPreRecreateBackup(process.env)) {
       note("  Backing up workspace state before recreating sandbox...");
@@ -7014,6 +7012,7 @@ async function onboard(opts: OnboardOptions = {}): Promise<void> {
         updateSession: onboardSession.updateSession,
         recordStepComplete,
         toSessionUpdates: (updates) => toSessionUpdates(updates as Parameters<typeof toSessionUpdates>[0]),
+        persistAppliedPolicyPresets: policyPresetCarry.persistFinalizedPolicyPresets,
       },
     });
     session = policiesResult.session;
